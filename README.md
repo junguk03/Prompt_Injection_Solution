@@ -16,7 +16,6 @@
 │   ├── attacks_ko.jsonl    한국어 공격 — A·C·D·F (각 50건)
 │   ├── attacks_ko_b.jsonl  한국어 공격 — B 간접 주입 (50건)
 │   ├── attacks_ko_e.jsonl  한국어 공격 — E 목표 변경 (50건)
-│   ├── attacks_en.jsonl    비교용 영어 공격
 │   └── benign_ko.jsonl     정상 요청 (FPR 측정용)
 ├── detector.py            정규식 + 자모 정규화 탐지기
 ├── evaluate.py            TPR / FPR / F1 평가
