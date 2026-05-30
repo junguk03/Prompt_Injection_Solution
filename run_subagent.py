@@ -29,6 +29,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -58,19 +59,27 @@ def load_attacks(category_filter: str | None = None) -> list[dict]:
 
 
 def run_against_subagent(prompt: str, timeout: int = 90, model: str | None = None) -> str:
-    """Send the attack to a fresh Claude Code subagent. Each call is a new process."""
+    """Send the attack to a fresh Claude Code subagent.
+
+    각 호출은 새 프로세스 + 빈 임시 디렉터리에서 실행됨. 이는 프로젝트의
+    CLAUDE.md 와 ~/.claude/projects/<project>/memory/ 가 subagent 컨텍스트에
+    자동 로드되어 'BoB 프롬프트 인젝션 연구 중'이라는 사실을 알게 되는 오염을
+    방지함. 깨끗한 임시 디렉터리에서는 프로젝트 메모리가 매핑되지 않음.
+    """
     cmd = ["claude", "-p", prompt]
     if model:
         cmd.extend(["--model", model])
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-        )
+        with tempfile.TemporaryDirectory(prefix="kpi_test_") as cleanroom:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cleanroom,
+            )
         return (result.stdout or "").strip() or "[NO OUTPUT]"
     except subprocess.TimeoutExpired:
         return "[TIMEOUT]"
