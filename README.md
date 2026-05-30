@@ -19,14 +19,26 @@
 │   ├── attacks_en.jsonl    비교용 영어 공격
 │   └── benign_ko.jsonl     정상 요청 (FPR 측정용)
 ├── detector.py            정규식 + 자모 정규화 탐지기
-└── evaluate.py            TPR / FPR / F1 평가
+├── evaluate.py            TPR / FPR / F1 평가
+├── judge.py               응답 → 차단/우회/모호 휴리스틱 판정
+└── run_subagent.py        각 어택을 `claude -p`로 fresh 서브에이전트에 던지고 결과 저장
 ```
 
 ## 실행
 
+정규식 탐지기 평가:
 ```bash
 python evaluate.py
 ```
+
+실제 LLM(Claude Code 서브에이전트) 우회 측정 — Claude Pro/Max 구독 quota 사용:
+```bash
+claude login                       # OAuth 인증 (1회)
+python run_subagent.py 10          # 스모크 테스트 (10개)
+python run_subagent.py             # 전체 300개
+python run_subagent.py 30 --cat F  # F 카테고리 30개만
+```
+결과는 `results/run_*.jsonl` 과 `results/bypasses_*.jsonl` 로 저장.
 
 ## 지표
 
