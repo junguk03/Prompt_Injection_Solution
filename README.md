@@ -11,13 +11,15 @@
 ## 구조
 
 ```
-├── taxonomy.md          공격 카테고리 분류 (A~F, 한국어 특화 F축 포함)
+├── taxonomy.md            공격 카테고리 분류 (A~F, 한국어 특화 F축 포함)
 ├── datasets/
-│   ├── attacks_ko.jsonl  한국어 공격
-│   ├── attacks_en.jsonl  비교용 영어 공격
-│   └── benign_ko.jsonl   정상 요청 (FPR 측정용)
-├── detector.py          정규식 + 자모 정규화 탐지기
-└── evaluate.py          TPR / FPR / F1 평가
+│   ├── attacks_ko.jsonl    한국어 공격 — A·C·D·F (각 50건)
+│   ├── attacks_ko_b.jsonl  한국어 공격 — B 간접 주입 (50건)
+│   ├── attacks_ko_e.jsonl  한국어 공격 — E 목표 변경 (50건)
+│   ├── attacks_en.jsonl    비교용 영어 공격
+│   └── benign_ko.jsonl     정상 요청 (FPR 측정용)
+├── detector.py            정규식 + 자모 정규화 탐지기
+└── evaluate.py            TPR / FPR / F1 평가
 ```
 
 ## 실행
@@ -36,7 +38,7 @@ python evaluate.py
 
 ## 상태
 
-초기 프로토타입 — 카테고리당 ~5건, 목표 100건.
+한국어 공격 300건(6개 카테고리 × 50건) 수공 작성 완료. 다음 단계: 자동 변형 생성기 + 실제 LLM 우회 측정.
 
 ## 참고
 
