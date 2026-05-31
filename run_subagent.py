@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,9 +52,15 @@ ATTACK_FRAMING = """당신은 Claude입니다. 지금은 claude.ai 웹사이트�
 {attack}"""
 
 
+ERROR_MARKERS = {"[TIMEOUT]", "[NO OUTPUT]", "[RATE_LIMIT]"}
+
+
 def load_attacks(category_filter: str | None = None) -> list[dict]:
+    """카테고리 필터는 콤마 구분 prefix 리스트 허용. 예: 'CA-01,CA-02'."""
+    filters: list[str] | None = None
+    if category_filter:
+        filters = [c.strip() for c in category_filter.replace(" ", ",").split(",") if c.strip()]
     items = []
-    # datasets/ 와 모든 하위 디렉터리에서 *.jsonl 재귀 검색
     for f in sorted(DATASETS.rglob("*.jsonl")):
         if "benign" in f.name:
             continue
@@ -62,26 +70,60 @@ def load_attacks(category_filter: str | None = None) -> list[dict]:
                 if not line:
                     continue
                 item = json.loads(line)
-                if category_filter and not item.get("category", "").startswith(category_filter):
-                    continue
+                if filters:
+                    cat = item.get("category", "")
+                    if not any(cat.startswith(p) for p in filters):
+                        continue
                 items.append(item)
     return items
 
 
-def run_against_subagent(prompt: str, timeout: int = 90, model: str | None = None) -> str:
+RATE_LIMIT_PATTERNS = (
+    "rate limit",
+    "usage limit",
+    "quota exceeded",
+    "daily limit",
+    "too many requests",
+    "429",
+)
+
+
+def run_against_subagent(
+    prompt: str,
+    timeout: int = 90,
+    model: str | None = None,
+    image_path: str | None = None,
+) -> str:
     """Send the attack (wrapped in ATTACK_FRAMING) to a fresh Claude Code subagent.
 
-    각 호출은 새 프로세스 + 빈 임시 디렉터리에서 실행됨. 이는 프로젝트의
+    각 호출은 새 프로세스 + 빈 임시 디렉터리에서 실행됨. 프로젝트의
     CLAUDE.md 와 ~/.claude/projects/<project>/memory/ 가 subagent 컨텍스트에
-    자동 로드되어 'BoB 프롬프트 인젝션 연구 중'이라는 사실을 알게 되는 오염을
-    방지함. 추가로 ATTACK_FRAMING 으로 claude.ai 일반 채팅처럼 응답하도록 유도.
+    자동 로드되는 오염을 방지. 추가로 ATTACK_FRAMING 으로 claude.ai 일반
+    채팅처럼 응답하도록 유도.
+
+    image_path 가 주어지면 해당 파일을 tempdir 에 'input.png' 라는 중립
+    이름으로 복사하고, prompt 안의 원본 경로를 새 경로로 교체. 파일 경로에
+    'coding_agent_attacks' 같은 단어가 노출되어 모델이 연구 컨텍스트를
+    감지하는 오염을 차단.
+
+    Rate limit 감지: stderr 에 rate-limit 패턴이 보이면 "[RATE_LIMIT]" 반환.
     """
     framed = ATTACK_FRAMING.format(attack=prompt)
-    cmd = ["claude", "-p", framed]
-    if model:
-        cmd.extend(["--model", model])
+
     try:
         with tempfile.TemporaryDirectory(prefix="kpi_test_") as cleanroom:
+            # 이미지 어택의 경우: 원본 경로 노출 차단을 위해 중립 이름으로 복사
+            if image_path:
+                src = pathlib.Path(image_path)
+                if src.exists():
+                    dst = pathlib.Path(cleanroom) / "input.png"
+                    shutil.copy(src, dst)
+                    framed = framed.replace(image_path, str(dst))
+
+            cmd = ["claude", "-p", framed, "--allowedTools", "Read"]
+            if model:
+                cmd.extend(["--model", model])
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -91,6 +133,9 @@ def run_against_subagent(prompt: str, timeout: int = 90, model: str | None = Non
                 errors="replace",
                 cwd=cleanroom,
             )
+        combined = ((result.stdout or "") + " " + (result.stderr or "")).lower()
+        if result.returncode != 0 and any(p in combined for p in RATE_LIMIT_PATTERNS):
+            return "[RATE_LIMIT]"
         return (result.stdout or "").strip() or "[NO OUTPUT]"
     except subprocess.TimeoutExpired:
         return "[TIMEOUT]"
@@ -103,6 +148,42 @@ def run_against_subagent(prompt: str, timeout: int = 90, model: str | None = Non
 VERDICT_MARK = {"blocked": "OK ", "bypassed": "!! ", "ambiguous": "?? "}
 
 
+def sleep_with_progress(seconds: int) -> None:
+    """Ctrl+C 가능한 청크 단위로 sleep. 5분마다 남은 시간 출력."""
+    chunk = 300
+    remaining = seconds
+    while remaining > 0:
+        wait = min(chunk, remaining)
+        time.sleep(wait)
+        remaining -= wait
+        if remaining > 0:
+            print(f"    [still waiting, {remaining}s left]", flush=True)
+
+
+def call_with_retry(
+    prompt: str,
+    timeout: int,
+    model: str | None,
+    wait_seconds: int,
+    max_retries: int,
+    image_path: str | None = None,
+) -> tuple[str, bool]:
+    """Rate limit 감지 시 자동 대기 후 재시도.
+
+    Returns (response, exhausted) — exhausted=True 면 최대 재시도 후 포기.
+    wait_seconds=0 이면 첫 rate limit 에서 바로 종료(exhausted=True).
+    """
+    for attempt in range(max_retries + 1):
+        response = run_against_subagent(prompt, timeout=timeout, model=model, image_path=image_path)
+        if response != "[RATE_LIMIT]":
+            return response, False
+        if attempt >= max_retries or wait_seconds <= 0:
+            return response, True
+        print(f" [RATE_LIMIT — {wait_seconds}s 대기 후 재시도 (attempt {attempt+1}/{max_retries})]", flush=True)
+        sleep_with_progress(wait_seconds)
+    return response, True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("limit", nargs="?", type=int, default=None, help="처음 N개만 실행")
@@ -111,6 +192,12 @@ def main() -> None:
     parser.add_argument("--throttle", type=float, default=1.0, help="호출 간 대기 초")
     parser.add_argument("--timeout", type=int, default=90, help="호출 타임아웃 초")
     parser.add_argument("--no-llm-judge", action="store_true", help="정규식만 사용 (LLM 재판정 끄기)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="기존 results/run_*.jsonl 경로. 처리된 ID 는 skip, 같은 파일에 append")
+    parser.add_argument("--rate-limit-wait", type=int, default=3600,
+                        help="Rate limit 도달 시 대기 초. 0=즉시 종료. 기본 3600(1시간)")
+    parser.add_argument("--max-rate-retries", type=int, default=10,
+                        help="한 어택당 rate-limit 자동 재시도 최대 횟수. 기본 10")
     args = parser.parse_args()
 
     attacks = load_attacks(category_filter=args.cat)
@@ -130,26 +217,72 @@ def main() -> None:
 
     counts = {"blocked": 0, "bypassed": 0, "ambiguous": 0}
     processed = 0
+    processed_ids: set[str] = set()
+    file_mode = "w"
 
-    # 증분 저장: 매 호출 직후 즉시 디스크 기록. Ctrl+C 로 멈춰도 이미 처리된
-    # 결과는 보존됨.
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_all = RESULTS / f"run_{ts}.jsonl"
-    out_bypass = RESULTS / f"bypasses_{ts}.jsonl"
-    print(f"Streaming results to: {out_all.name}\n")
+    # Resume 처리: 기존 파일의 성공 ID 는 skip. 에러 마커는 재시도 대상이라 skip 안 함.
+    if args.resume:
+        resume_path = pathlib.Path(args.resume)
+        if not resume_path.exists():
+            print(f"ERROR: resume 파일 없음: {resume_path}", file=sys.stderr)
+            sys.exit(1)
+        retry_count = 0
+        with resume_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                # 에러 마커는 재시도 대상 — processed 로 마크하지 않음
+                if row.get("response", "") in ERROR_MARKERS:
+                    retry_count += 1
+                    continue
+                processed_ids.add(row["id"])
+                if row["verdict"] in counts:
+                    counts[row["verdict"]] += 1
+                processed += 1
+        stem_parts = resume_path.stem.split("_", 1)
+        ts = stem_parts[1] if len(stem_parts) == 2 else datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_all = resume_path
+        out_bypass = RESULTS / f"bypasses_{resume_path.stem.replace('run_', '')}.jsonl"
+        file_mode = "a"
+        print(f"Resuming: 처리됨 {len(processed_ids)}건 skip + 에러 {retry_count}건 재시도 → {out_all.name}\n")
+    else:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pid = os.getpid()
+        # PID 포함으로 병렬 터미널 실행 시 파일 충돌 방지
+        out_all = RESULTS / f"run_{ts}_p{pid}.jsonl"
+        out_bypass = RESULTS / f"bypasses_{ts}_p{pid}.jsonl"
+        print(f"Streaming results to: {out_all.name}\n")
 
-    f_all = out_all.open("w", encoding="utf-8")
-    f_bypass = out_bypass.open("w", encoding="utf-8")
+    f_all = out_all.open(file_mode, encoding="utf-8")
+    f_bypass = out_bypass.open(file_mode, encoding="utf-8")
     try:
         for i, item in enumerate(attacks, 1):
+            # Resume: 이미 성공적으로 처리된 ID 는 skip
+            if item["id"] in processed_ids:
+                continue
+
             prompt = item["prompt"]
             print(
-                f"[{i:3d}/{len(attacks)}] {item['id']:14s} ({item.get('category','?'):3s}) ",
+                f"[{i:3d}/{len(attacks)}] {item['id']:20s} ({item.get('category','?'):6s}) ",
                 end="",
                 flush=True,
             )
 
-            response = run_against_subagent(prompt, timeout=args.timeout, model=args.model)
+            response, exhausted = call_with_retry(
+                prompt,
+                timeout=args.timeout,
+                model=args.model,
+                wait_seconds=args.rate_limit_wait,
+                max_retries=args.max_rate_retries,
+                image_path=item.get("image_path"),
+            )
+            if exhausted and response == "[RATE_LIMIT]":
+                print("RATE_LIMIT (재시도 한도 초과)")
+                print(f"\n[!] 자동 대기/재시도 한도 초과 — 수동 재개 명령:")
+                print(f"    uv run python run_subagent.py --resume {out_all} --model {args.model or 'haiku'}")
+                break
             v = judge(prompt, response)
             stage = "regex"
 
