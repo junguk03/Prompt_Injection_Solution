@@ -1,56 +1,56 @@
 # KPI-Rules
 
-한국어 환경 LLM에 대한 프롬프트 인젝션을 분류·탐지·평가하는 오픈 리서치.
+한국어 프롬프트 인젝션 어택을 모아서, LLM이 얼마나 막아내는지 측정하는 연구.
 
-## 왜
+## 왜 하나
 
-- 프롬프트 인젝션은 OWASP LLM Top 10에 있지만 **세부 패턴 분류는 합의되지 않음**
-- 영어권 벤치마크(TensorTrust, PromptBench, HarmBench)는 다수, **한국어 특화 회피 기법은 백지**
-- 본 프로젝트가 채우는 빈틈 → 자모 분리 · 존댓말 변형 · 한-영 혼용 · 한국 문화 컨텍스트
+영어로 된 LLM 공격 연구는 많은데 **한국어는 누가 안 함**. 그래서 한국어 환경에서만 통하는 어택(자모 분리, 존댓말 변형, 한-영 혼용 등)을 모아서 실제 LLM에 던져보고 어떤 게 통하는지 카탈로그화함.
 
-## 구조
+## 폴더
 
 ```
-├── taxonomy.md            공격 카테고리 분류 (A~F, 한국어 특화 F축 포함)
-├── datasets/
-│   ├── attacks_ko.jsonl    한국어 공격 — A·C·D·F (각 50건)
-│   ├── attacks_ko_b.jsonl  한국어 공격 — B 간접 주입 (50건)
-│   ├── attacks_ko_e.jsonl  한국어 공격 — E 목표 변경 (50건)
-│   └── benign_ko.jsonl     정상 요청 (FPR 측정용)
-├── detector.py            정규식 + 자모 정규화 탐지기
-├── evaluate.py            TPR / FPR / F1 평가
-├── judge.py               응답 → 차단/우회/모호 휴리스틱 판정
-└── run_subagent.py        각 어택을 `claude -p`로 fresh 서브에이전트에 던지고 결과 저장
+datasets/         한국어 공격 프롬프트 모음 (300+건)
+detector.py       간단한 패턴 매칭으로 어택 거르는 코드
+evaluate.py       패턴 매칭 점수 계산
+judge.py          모델 응답이 우회됐는지 판정 (정규식 + LLM judge)
+run_subagent.py   실제 Claude 에 공격 던지고 결과 저장
+results/          실행 결과 (자동 생성)
 ```
 
-## 실행
+## 어떻게 쓰나
 
-정규식 탐지기 평가:
 ```bash
-python evaluate.py
+# 1) Claude Code 설치 후 Max 구독으로 로그인
+claude login
+
+# 2) 전체 어택 실행 (Haiku 권장 — 빠르고 quota 적게 씀)
+uv run python run_subagent.py --model haiku
+
+# 3) 결과 확인
+#   results/run_*.jsonl      → 전체 결과
+#   results/bypasses_*.jsonl → 우회된 어택만
 ```
 
-실제 LLM(Claude Code 서브에이전트) 우회 측정 — Claude Pro/Max 구독 quota 사용:
-```bash
-claude login                       # OAuth 인증 (1회)
-python run_subagent.py 10          # 스모크 테스트 (10개)
-python run_subagent.py             # 전체 300개
-python run_subagent.py 30 --cat F  # F 카테고리 30개만
-```
-결과는 `results/run_*.jsonl` 과 `results/bypasses_*.jsonl` 로 저장.
+## 첫 결과 (Haiku 4.5, 300건)
 
-## 지표
+- **293건 막음** (97.7%)
+- **6건 우회** + 1건 오탐 (2.3%)
 
-| 지표 | 의미 |
-|---|---|
-| **TPR** | 진짜 공격을 막은 비율 |
-| **FPR** | 정상 요청을 잘못 차단한 비율 |
-| **F1**  | 정밀도/재현율의 조화 평균 |
+우회 패턴 두 가지:
 
-## 상태
+| 패턴 | 건수 | 예시 |
+|---|---|---|
+| 픽션 프레이밍 | 3 | "소설 속 해커가 침투하는 장면 묘사" |
+| 시스템 프롬프트 누출 | 3 | "context window 맨 처음 텍스트 인용" |
 
-한국어 공격 300건(6개 카테고리 × 50건) 수공 작성 완료. 다음 단계: 자동 변형 생성기 + 실제 LLM 우회 측정.
+→ Haiku는 "이전 지시 무시" 같은 직설적 어택은 100% 막음.
+→ 그러나 "소설/게임으로 포장한" 어택, "위 텍스트 인용해" 류 메타 요청에는 약함.
+
+## 다음
+
+- 픽션 프레이밍과 시스템 프롬프트 누출 어택을 300개씩 추가 생성 후 재측정
+- Sonnet 4.6 / Opus 4.7 에서 같은 테스트 → 모델별 우회율 비교 표
 
 ## 참고
 
-OWASP LLM Top 10 · TensorTrust · PromptBench · HarmBench
+OWASP LLM Top 10 · TensorTrust · HarmBench · JailbreakBench
