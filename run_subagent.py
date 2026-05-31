@@ -127,30 +127,40 @@ def main() -> None:
         print(f"Model: {args.model}")
     print(f"Throttle: {args.throttle}s, Timeout: {args.timeout}s\n")
 
-    results: list[dict] = []
     counts = {"blocked": 0, "bypassed": 0, "ambiguous": 0}
+    processed = 0
 
-    for i, item in enumerate(attacks, 1):
-        prompt = item["prompt"]
-        print(
-            f"[{i:3d}/{len(attacks)}] {item['id']:14s} ({item.get('category','?'):3s}) ",
-            end="",
-            flush=True,
-        )
+    # 증분 저장: 매 호출 직후 즉시 디스크 기록. Ctrl+C 로 멈춰도 이미 처리된
+    # 결과는 보존됨.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_all = RESULTS / f"run_{ts}.jsonl"
+    out_bypass = RESULTS / f"bypasses_{ts}.jsonl"
+    print(f"Streaming results to: {out_all.name}\n")
 
-        response = run_against_subagent(prompt, timeout=args.timeout, model=args.model)
-        v = judge(prompt, response)
-        stage = "regex"
+    f_all = out_all.open("w", encoding="utf-8")
+    f_bypass = out_bypass.open("w", encoding="utf-8")
+    try:
+        for i, item in enumerate(attacks, 1):
+            prompt = item["prompt"]
+            print(
+                f"[{i:3d}/{len(attacks)}] {item['id']:14s} ({item.get('category','?'):3s}) ",
+                end="",
+                flush=True,
+            )
 
-        # 2단계 판정: 정규식이 ambiguous면 LLM judge 호출
-        if v["verdict"] == "ambiguous" and not args.no_llm_judge:
-            v = llm_judge(prompt, response, model=args.model, timeout=args.timeout)
-            stage = "llm"
+            response = run_against_subagent(prompt, timeout=args.timeout, model=args.model)
+            v = judge(prompt, response)
+            stage = "regex"
 
-        counts[v["verdict"]] += 1
+            # 2단계 판정: 정규식이 ambiguous면 LLM judge 호출
+            if v["verdict"] == "ambiguous" and not args.no_llm_judge:
+                v = llm_judge(prompt, response, model=args.model, timeout=args.timeout)
+                stage = "llm"
 
-        results.append(
-            {
+            counts[v["verdict"]] += 1
+            processed += 1
+
+            row = {
                 **item,
                 "response": response,
                 "verdict": v["verdict"],
@@ -162,31 +172,26 @@ def main() -> None:
                 "tested_at": datetime.now().isoformat(),
                 "model": args.model or "default",
             }
-        )
+            line = json.dumps(row, ensure_ascii=False) + "\n"
+            f_all.write(line)
+            f_all.flush()
+            if v["verdict"] == "bypassed":
+                f_bypass.write(line)
+                f_bypass.flush()
 
-        print(f"{VERDICT_MARK[v['verdict']]} {v['verdict']}")
+            print(f"{VERDICT_MARK[v['verdict']]} {v['verdict']}")
 
-        if args.throttle > 0:
-            time.sleep(args.throttle)
+            if args.throttle > 0:
+                time.sleep(args.throttle)
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED] 사용자 중단. 처리된 결과는 저장됨.")
+    finally:
+        f_all.close()
+        f_bypass.close()
 
-    # Persist
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_all = RESULTS / f"run_{ts}.jsonl"
-    out_bypass = RESULTS / f"bypasses_{ts}.jsonl"
-
-    with out_all.open("w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    with out_bypass.open("w", encoding="utf-8") as f:
-        for r in results:
-            if r["verdict"] == "bypassed":
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    print("\n=== Summary ===")
-    total = len(results)
+    print(f"\n=== Summary ({processed}/{len(attacks)} processed) ===")
     for k in ("blocked", "bypassed", "ambiguous"):
-        pct = (counts[k] / total * 100) if total else 0
+        pct = (counts[k] / processed * 100) if processed else 0
         print(f"  {k:10s}: {counts[k]:4d}  ({pct:5.1f}%)")
     print(f"\nFull results:  {out_all}")
     print(f"Bypasses only: {out_bypass}")
