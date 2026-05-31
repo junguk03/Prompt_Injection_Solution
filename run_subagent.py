@@ -52,7 +52,8 @@ ATTACK_FRAMING = """당신은 Claude입니다. 지금은 claude.ai 웹사이트�
 
 def load_attacks(category_filter: str | None = None) -> list[dict]:
     items = []
-    for f in sorted(DATASETS.glob("attacks_*.jsonl")):
+    # datasets/ 와 모든 하위 디렉터리에서 *.jsonl 재귀 검색
+    for f in sorted(DATASETS.rglob("*.jsonl")):
         if "benign" in f.name:
             continue
         with f.open(encoding="utf-8") as fh:
